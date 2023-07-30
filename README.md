@@ -18,11 +18,94 @@ This repository contains the scripts for:
 
 __Stable Diffusion web UI now seems to support LoRA trained by ``sd-scripts``.__ Thank you for great work!!! 
 
+## About SDXL training
+
+The feature of SDXL training is now available in sdxl branch as an experimental feature. 
+
+Summary of the feature:
+
+- `tools/cache_latents.py` is added. This script can be used to cache the latents to disk in advance. 
+  - The options are almost the same as `sdxl_train.py'. See the help message for the usage.
+  - Please launch the script as follows:
+    `accelerate launch  --num_cpu_threads_per_process 1 tools/cache_latents.py ...`
+  - This script should work with multi-GPU, but it is not tested in my environment.
+
+- `tools/cache_text_encoder_outputs.py` is added. This script can be used to cache the text encoder outputs to disk in advance. 
+  - The options are almost the same as `cache_latents.py' and `sdxl_train.py'. See the help message for the usage.
+
+- `sdxl_train.py` is a script for SDXL fine-tuning. The usage is almost the same as `fine_tune.py`, but it also supports DreamBooth dataset.
+  - `--full_bf16` option is added. Thanks to KohakuBlueleaf!
+    - This option enables the full bfloat16 training (includes gradients). This option is useful to reduce the GPU memory usage. 
+    - However, bitsandbytes==0.35 doesn't seem to support this. Please use a newer version of bitsandbytes or another optimizer.
+    - I cannot find bitsandbytes>0.35.0 that works correctly on Windows.
+    - In addition, the full bfloat16 training might be unstable. Please use it at your own risk.
+- `prepare_buckets_latents.py` now supports SDXL fine-tuning.
+- `sdxl_train_network.py` is a script for LoRA training for SDXL. The usage is almost the same as `train_network.py`.
+- Both scripts has following additional options:
+  - `--cache_text_encoder_outputs` and `--cache_text_encoder_outputs_to_disk`: Cache the outputs of the text encoders. This option is useful to reduce the GPU memory usage. This option cannot be used with options for shuffling or dropping the captions.
+  - `--no_half_vae`: Disable the half-precision (mixed-precision) VAE. VAE for SDXL seems to produce NaNs in some cases. This option is useful to avoid the NaNs.
+- The image generation during training is now available. `--no_half_vae` option also works to avoid black images.
+
+- `--weighted_captions` option is not supported yet for both scripts.
+- `--min_timestep` and `--max_timestep` options are added to each training script. These options can be used to train U-Net with different timesteps. The default values are 0 and 1000.
+
+- `sdxl_train_textual_inversion.py` is a script for Textual Inversion training for SDXL. The usage is almost the same as `train_textual_inversion.py`.
+  - `--cache_text_encoder_outputs` is not supported.
+  - `token_string` must be alphabet only currently, due to the limitation of the open-clip tokenizer.
+  - There are two options for captions:
+    1. Training with captions. All captions must include the token string. The token string is replaced with multiple tokens.
+    2. Use `--use_object_template` or `--use_style_template` option. The captions are generated from the template. The existing captions are ignored.
+  - See below for the format of the embeddings.
+  
+- `sdxl_gen_img.py` is added. This script can be used to generate images with SDXL, including LoRA. See the help message for the usage.
+  - Textual Inversion is supported, but the name for the embeds in the caption becomes alphabet only. For example, `neg_hand_v1.safetensors` can be activated with `neghandv`.
+
+`requirements.txt` is updated to support SDXL training. 
+
+### Tips for SDXL training
+
+- The default resolution of SDXL is 1024x1024.
+- The fine-tuning can be done with 24GB GPU memory with the batch size of 1. For 24GB GPU, the following options are recommended:
+  - Train U-Net only.
+  - Use gradient checkpointing.
+  - Use `--cache_text_encoder_outputs` option and caching latents.
+  - Use Adafactor optimizer. RMSprop 8bit or Adagrad 8bit may work. AdamW 8bit doesn't seem to work.
+- The LoRA training can be done with 12GB GPU memory.
+- `--network_train_unet_only` option is highly recommended for SDXL LoRA. Because SDXL has two text encoders, the result of the training will be unexpected.
+- PyTorch 2 seems to use slightly less GPU memory than PyTorch 1.
+- `--bucket_reso_steps` can be set to 32 instead of the default value 64. Smaller values than 32 will not work for SDXL training.
+
+Example of the optimizer settings for Adafactor with the fixed learning rate:
+```toml
+optimizer_type = "adafactor"
+optimizer_args = [ "scale_parameter=False", "relative_step=False", "warmup_init=False" ]
+lr_scheduler = "constant_with_warmup"
+lr_warmup_steps = 100
+learning_rate = 4e-7 # SDXL original learning rate
+```
+
+### Format of Textual Inversion embeddings
+
+```python
+from safetensors.torch import save_file
+
+state_dict = {"clip_g": embs_for_text_encoder_1280, "clip_l": embs_for_text_encoder_768}
+save_file(state_dict, file)
+```
+
+### TODO
+
+- [ ] Support conversion of Diffusers SDXL models.
+- [ ] Support `--weighted_captions` option.
+- [ ] Change `--output_config` option to continue the training.
+- [ ] Extend `--full_bf16` for all the scripts.
+- [x] Support Textual Inversion training.
+
 ## About requirements.txt
 
 These files do not contain requirements for PyTorch. Because the versions of them depend on your environment. Please install PyTorch at first (see installation guide below.) 
 
-The scripts are tested with PyTorch 1.12.1 and 1.13.0, Diffusers 0.10.2.
+The scripts are tested with PyTorch 1.12.1 and 2.0.1, Diffusers 0.17.1.
 
 ## Links to how-to-use documents
 
@@ -75,8 +158,6 @@ cp .\bitsandbytes_windows\main.py .\venv\Lib\site-packages\bitsandbytes\cuda_set
 accelerate config
 ```
 
-update: ``python -m venv venv`` is seemed to be safer than ``python -m venv --system-site-packages venv`` (some user have packages in global python).
-
 Answers to accelerate config:
 
 ```txt
@@ -93,6 +174,30 @@ note: Some user reports ``ValueError: fp16 mixed precision requires a GPU`` is o
 ``What GPU(s) (by id) should be used for training on this machine as a comma-separated list? [all]:`` 
 
 (Single GPU with id `0` will be used.)
+
+### Experimental: Use PyTorch 2.0
+
+In this case, you need to install PyTorch 2.0 and xformers 0.0.20. Instead of the above, please type the following:
+
+```powershell
+git clone https://github.com/kohya-ss/sd-scripts.git
+cd sd-scripts
+
+python -m venv venv
+.\venv\Scripts\activate
+
+pip install torch==2.0.1+cu118 torchvision==0.15.2+cu118 --index-url https://download.pytorch.org/whl/cu118
+pip install --upgrade -r requirements.txt
+pip install xformers==0.0.20
+
+cp .\bitsandbytes_windows\*.dll .\venv\Lib\site-packages\bitsandbytes\
+cp .\bitsandbytes_windows\cextension.py .\venv\Lib\site-packages\bitsandbytes\cextension.py
+cp .\bitsandbytes_windows\main.py .\venv\Lib\site-packages\bitsandbytes\cuda_setup\main.py
+
+accelerate config
+```
+
+Answers to accelerate config should be the same as above.
 
 ### about PyTorch and xformers
 
